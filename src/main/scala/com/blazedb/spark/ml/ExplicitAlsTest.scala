@@ -7,10 +7,12 @@ import breeze.linalg.rank
 import org.apache.spark.ml.recommendation._
 import org.apache.spark.ml._
 import org.apache.spark._
+import org.apache.spark.ml.param.ParamMap
 import org.apache.spark.ml.recommendation.ALS.Rating
 import org.apache.spark.ml.util.DefaultReadWriteTest
 import org.apache.spark.mllib.util.MLlibTestSparkContext
 import org.apache.spark.rdd.RDD
+import org.apache.spark.sql.{Row, SQLContext}
 //import org.apache.spark.sql.SQLContext
 import org.scalatest.FunSuite
 import com.github.fommil.netlib.BLAS.{getInstance => blas}
@@ -27,16 +29,16 @@ class ExplicitAlsTest
 
 object  ExplicitAlsTest {
 
-  def blastorama(sc: SparkContext) = {
-    val (ratings, _) = genImplicitTestData(sc, numUsers = 1000, numItems = 800, rank = 20, noiseStd = 0.01)
+  def blastorama(sc: SparkContext, sqlc: SQLContext) = {
+    val (training, test) =
+        genImplicitTestData(sc, numUsers = 1000, numItems = 800, rank = 20, noiseStd = 0.01)
+    testALS(sqlc, training, test, maxIter = 50, rank = 10, regParam = 1e-4, targetRMSE = 0.002,
+     numItemBlocks = 5, numUserBlocks = 5)
 
-    val longRatings = ratings.map(r => Rating(r.user.toLong, r.item.toLong, r.rating))
-    val (longUserFactors, _) = ALS.train(longRatings, rank = 200, maxIter = 4, seed = 0)
-    assert(longUserFactors.first()._1.getClass == classOf[Long], s"Incorrect userfactors class (!=Long)")
-
-    val strRatings = ratings.map(r => Rating(r.user.toString, r.item.toString, r.rating))
-    val (strUserFactors, _) = ALS.train(strRatings, rank = 2, maxIter = 4, seed = 0)
-    assert(strUserFactors.first()._1.getClass == classOf[String], s"Incorrect userfactors class (!=String)")
+//    val (training, test) =
+//      genImplicitTestData(numUsers = 20, numItems = 40, rank = 2, noiseStd = 0.01)
+//    testALS(training, test, maxIter = 4, rank = 2, regParam = 0.01, implicitPrefs = true,
+//      targetRMSE = 0.3)
   }
 
   def logInfo(msg: String) = {
@@ -160,6 +162,81 @@ object  ExplicitAlsTest {
     ids.toSeq.sorted.map(id => (id, Array.fill(rank)(a + random.nextFloat() * width)))
   }
 
+  /**
+   * Test ALS using the given training/test splits and parameters.
+   * @param training training dataset
+   * @param test test dataset
+   * @param rank rank of the matrix factorization
+   * @param maxIter max number of iterations
+   * @param regParam regularization constant
+   * @param implicitPrefs whether to use implicit preference
+   * @param numUserBlocks number of user blocks
+   * @param numItemBlocks number of item blocks
+   * @param targetRMSE target test RMSE
+   */
+  def testALS(
+    sqlc: SQLContext,
+      training: RDD[Rating[Int]],
+      test: RDD[Rating[Int]],
+      rank: Int,
+      maxIter: Int,
+      regParam: Double,
+      implicitPrefs: Boolean = false,
+      numUserBlocks: Int = 2,
+      numItemBlocks: Int = 3,
+      targetRMSE: Double = 0.05): Unit = {
+    import sqlc.implicits._
+    val als = new ALS()
+      .setRank(rank)
+      .setRegParam(regParam)
+      .setImplicitPrefs(implicitPrefs)
+      .setNumUserBlocks(numUserBlocks)
+      .setNumItemBlocks(numItemBlocks)
+      .setSeed(0)
+    val alpha = als.getAlpha
+    val model = als.fit(training.toDF())
+    val predictions = model.transform(test.toDF())
+      .select("rating", "prediction")
+      .map { case Row(rating: Float, prediction: Float) =>
+        (rating.toDouble, prediction.toDouble)
+      }
+    val rmse =
+      if (implicitPrefs) {
+        // TODO: Use a better (rank-based?) evaluation metric for implicit feedback.
+        // We limit the ratings and the predictions to interval [0, 1] and compute the weighted RMSE
+        // with the confidence scores as weights.
+        val (totalWeight, weightedSumSq) = predictions.map { case (rating, prediction) =>
+          val confidence = 1.0 + alpha * math.abs(rating)
+          val rating01 = math.max(math.min(rating, 1.0), 0.0)
+          val prediction01 = math.max(math.min(prediction, 1.0), 0.0)
+          val err = prediction01 - rating01
+          (confidence, confidence * err * err)
+        }.reduce { case ((c0, e0), (c1, e1)) =>
+          (c0 + c1, e0 + e1)
+        }
+        math.sqrt(weightedSumSq / totalWeight)
+      } else {
+        val mse = predictions.map { case (rating, prediction) =>
+          val err = rating - prediction
+          err * err
+        }.mean()
+        math.sqrt(mse)
+      }
+    logInfo(s"Test RMSE is $rmse.")
+    assert(rmse < targetRMSE)
+
+    // copied model must have the same parent.
+    checkCopy(model)
+  }
+
+  def checkCopy(model: Model[_]): Unit = {
+    val copied = model.copy(ParamMap.empty)
+      .asInstanceOf[Model[_]]
+    assert(copied.parent.uid == model.parent.uid)
+    assert(copied.parent == model.parent)
+  }
+
+
   def main(args: Array[String]) = {
     val master = args(0)
 
@@ -174,8 +251,8 @@ object  ExplicitAlsTest {
 //    val tempDir = File.createTempFile(s"hdfs://$host:8021/tmp/alsTest","tmp")
     val tempDir = s"/data/check/alsTest"
     sc.setCheckpointDir(tempDir)
-//     val sqlc = new SQLContext(sc)
-    blastorama(sc)
+     val sqlc = new SQLContext(sc)
+    val res = blastorama(sc, sqlc)
 
   }
 }
