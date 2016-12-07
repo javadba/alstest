@@ -4,6 +4,7 @@ import java.io.File
 import java.util.Random
 
 import breeze.linalg.rank
+import com.blazedb.spark.ml.util.SizeEstimator
 import org.apache.spark.ml.recommendation._
 import org.apache.spark.ml._
 import org.apache.spark._
@@ -206,6 +207,10 @@ object AlsTest {
     import sqlc.implicits._
     training.persist(StorageLevel.DISK_ONLY)
     test.persist(StorageLevel.DISK_ONLY)
+//    val NSamples = 100
+//    val trainSize = SizeEstimator.getTotalSize(training, NSamples)
+//    val testSize = SizeEstimator.getTotalSize(test, NSamples)
+//    println(s"trainSize: $trainSize testSize=$testSize")
     val als = new ALS()
       .setRank(rank)
       .setRegParam(regParam)
@@ -287,8 +292,15 @@ object AlsTest {
     val noiseStdev = if (args.length >= 10) args(i).toDouble else 0.01
     i += 1
     val alsp = AlsParams(users, items, userBlocks, itemBlocks, factors, iters, regLambda, rmse, noiseStdev)
+    com.esotericsoftware.minlog.Log.TRACE()
     println(s"Running ALSTest with $alsp")
     val sparkConf = new SparkConf().setMaster(master).setAppName("ALSTest")
+      .set("spark.kryoserializer.buffer.max", "2047m")
+      .set("spark.kryoserializer.buffer","1g")
+      .set("spark.serializer","org.apache.spark.serializer.KryoSerializer")
+    .set("spark.rdd.compress","true")
+      .set("spark.executor.extraJavaOptions","-verbose:gc -XX:+PrintGCDetails -XX:+PrintGCTimeStamps -XX:MetaspaceSize=100M")
+    sparkConf.registerKryoClasses(Array(classOf[Rating[Int]], classOf[Tuple2[Double,Double]]))
     val sc = new SparkContext(sparkConf)
     // val host = java.net.InetAddress.getLocalHost.getHostName
     //    val tempDir = File.createTempFile(s"hdfs://$host:8021/tmp/alsTest","tmp")
@@ -299,4 +311,3 @@ object AlsTest {
 
   }
 }
-
