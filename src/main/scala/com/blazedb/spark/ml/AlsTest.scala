@@ -205,13 +205,13 @@ object AlsTest {
     numItemBlocks: Int = 3,
     targetRMSE: Double = 0.05): Unit = {
     import sqlc.implicits._
-    training.persist(StorageLevel.DISK_ONLY)
-    test.persist(StorageLevel.DISK_ONLY)
+    training.persist(StorageLevel.MEMORY_ONLY)
+    test.persist(StorageLevel.MEMORY_ONLY)
 //    val NSamples = 100
 //    val trainSize = SizeEstimator.getTotalSize(training, NSamples)
 //    val testSize = SizeEstimator.getTotalSize(test, NSamples)
 //    println(s"trainSize: $trainSize testSize=$testSize")
-    val als = new ALS()
+    val als = new VzALS()
       .setRank(rank)
       .setRegParam(regParam)
       .setImplicitPrefs(implicitPrefs)
@@ -271,8 +271,12 @@ object AlsTest {
       System.exit(1)
     }
     var i = 0
-    val master = args(i)
-    i += 1
+    val master = if (args(i).startsWith("master=")) {
+      i += 1
+      Some(args(i-1).substring("master=".length))
+    } else {
+      None
+    }
     val users = args(i).toInt
     i += 1
     val items = args(i).toInt
@@ -292,19 +296,20 @@ object AlsTest {
     val noiseStdev = if (args.length >= 10) args(i).toDouble else 0.01
     i += 1
     val alsp = AlsParams(users, items, userBlocks, itemBlocks, factors, iters, regLambda, rmse, noiseStdev)
-    com.esotericsoftware.minlog.Log.TRACE()
+    // com.esotericsoftware.minlog.Log.TRACE()
     println(s"Running ALSTest with $alsp")
-    val sparkConf = new SparkConf().setMaster(master).setAppName("ALSTest")
+    val sparkConf = new SparkConf().setAppName("ALSTest")
       .set("spark.kryoserializer.buffer.max", "2047m")
       .set("spark.kryoserializer.buffer","1g")
       .set("spark.serializer","org.apache.spark.serializer.KryoSerializer")
     .set("spark.rdd.compress","true")
       .set("spark.executor.extraJavaOptions","-verbose:gc -XX:+PrintGCDetails -XX:+PrintGCTimeStamps -XX:MetaspaceSize=100M")
+    master.map{ m => sparkConf.setMaster(m) }
     sparkConf.registerKryoClasses(Array(classOf[Rating[Int]], classOf[Tuple2[Double,Double]]))
     val sc = new SparkContext(sparkConf)
     // val host = java.net.InetAddress.getLocalHost.getHostName
     //    val tempDir = File.createTempFile(s"hdfs://$host:8021/tmp/alsTest","tmp")
-    val tempDir = s"/data/check/alsTest"
+    val tempDir = s"/tmp/alsTest"
     sc.setCheckpointDir(tempDir)
     val sqlc = new SQLContext(sc)
     val res = blastorama(sc, sqlc, alsp)
