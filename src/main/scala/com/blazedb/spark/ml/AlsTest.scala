@@ -226,6 +226,8 @@ object AlsTest {
       .map { case Row(rating: Float, prediction: Float) =>
         (rating.toDouble, prediction.toDouble)
       }
+	val Rmse = false
+   if (Rmse) {
     val rmse =
       if (implicitPrefs) {
         // TODO: Use a better (rank-based?) evaluation metric for implicit feedback.
@@ -252,6 +254,7 @@ object AlsTest {
     if (rmse < targetRMSE) {
       logError(s"rmse=$rmse whereas we kinda figured $targetRMSE")
     }
+	}
 
     // copied model must have the same parent.
     checkCopy(model)
@@ -296,7 +299,7 @@ object AlsTest {
     val noiseStdev = if (args.length >= 10) args(i).toDouble else 0.01
     i += 1
     val alsp = AlsParams(users, items, userBlocks, itemBlocks, factors, iters, regLambda, rmse, noiseStdev)
-    // com.esotericsoftware.minlog.Log.TRACE()
+   // com.esotericsoftware.minlog.Log.TRACE()
     println(s"Running ALSTest with $alsp")
     val sparkConf = new SparkConf().setAppName("ALSTest")
       .set("spark.kryoserializer.buffer.max", "2047m")
@@ -309,7 +312,7 @@ object AlsTest {
     val sc = new SparkContext(sparkConf)
     // val host = java.net.InetAddress.getLocalHost.getHostName
     //    val tempDir = File.createTempFile(s"hdfs://$host:8021/tmp/alsTest","tmp")
-    val tempDir = s"/tmp/alsTest"
+    val tempDir = s"alsTest"
     sc.setCheckpointDir(tempDir)
     val sqlc = new SQLContext(sc)
     val res = blastorama(sc, sqlc, alsp)
