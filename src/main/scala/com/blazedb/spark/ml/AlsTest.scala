@@ -1,23 +1,20 @@
 package com.blazedb.spark.ml
 
-import java.io.File
 import java.util.Random
 
-import breeze.linalg.rank
-import com.blazedb.spark.ml.util.SizeEstimator
-import org.apache.spark.ml.recommendation._
-import org.apache.spark.ml._
 import org.apache.spark._
+import org.apache.spark.ml._
 import org.apache.spark.ml.param.ParamMap
 import org.apache.spark.ml.recommendation.ALS.Rating
+import org.apache.spark.ml.recommendation._
 import org.apache.spark.ml.util.DefaultReadWriteTest
 import org.apache.spark.mllib.util.MLlibTestSparkContext
 import org.apache.spark.rdd.RDD
 import org.apache.spark.sql.{Row, SQLContext}
 import org.apache.spark.storage.StorageLevel
 //import org.apache.spark.sql.SQLContext
-import org.scalatest.FunSuite
 import com.github.fommil.netlib.BLAS.{getInstance => blas}
+import org.scalatest.FunSuite
 
 import scala.collection.mutable
 import scala.collection.mutable.ArrayBuffer
@@ -31,12 +28,15 @@ class ExplicitAlsTest
 
 object AlsTest {
 
+  def toString(level: StorageLevel) = s"StorageLevel(${if (level.useDisk) {"Disk,"} else ""} ${if (level.useMemory) {"Mem,"} else ""} ${if (!level.deserialized) {"Serialized"} else ""})"
+
   case class AlsParams(users: Int, items: Int, userBlocks: Int, itemBlocks: Int, factors: Int, iters: Int,
-    regLambda: Double = 1e-4, rmse: Double = 2e-3, noiseStdev: Double = 1e-2) {
+    persistLevel: StorageLevel, checkpointInterval: Int, regLambda: Double = 1e-4, rmse: Double = 2e-3, noiseStdev: Double = 1e-2) {
     override def toString() = {
       s"ALS: users=$users items=$items ublocks=$userBlocks iblocks=$itemBlocks factors=$factors" +
-        s" iters=$iters lambda=$regLambda rmse=$rmse noise=$noiseStdev"
+        s" iters=$iters persist=${AlsTest.toString(persistLevel)} chkpt=$checkpointInterval lambda=$regLambda rmse=$rmse noise=$noiseStdev"
     }
+
   }
 
   def blastorama(sc: SparkContext, sqlc: SQLContext, alsp: AlsParams) = {
@@ -45,8 +45,8 @@ object AlsTest {
       genImplicitTestData(sc, alsp.users, alsp.items, alsp.factors, alsp.noiseStdev)
     println(s"Generated dataset in ${(System.currentTimeMillis - start)}ms")
     val start2 = System.currentTimeMillis
-    testALS(sqlc, training, test, maxIter = alsp.iters, rank = alsp.factors, regParam = alsp.regLambda, targetRMSE = alsp.rmse,
-      numItemBlocks = alsp.itemBlocks, numUserBlocks = alsp.userBlocks)
+    testALS(sqlc, training, test, implicitPrefs=true, maxIter = alsp.iters, rank = alsp.factors, regParam = alsp.regLambda, targetRMSE = alsp.rmse,
+      checkpointInterval = alsp.checkpointInterval, numItemBlocks = alsp.itemBlocks, numUserBlocks = alsp.userBlocks, persistLevel =  alsp.persistLevel)
     println(s"ALS Test ran in ${((System.currentTimeMillis - start2) / 100).toInt / 10}secs")
 
     //    val (training, test) =
@@ -200,13 +200,15 @@ object AlsTest {
     rank: Int,
     maxIter: Int,
     regParam: Double,
+    persistLevel: StorageLevel,
+    checkpointInterval: Int,
     implicitPrefs: Boolean = false,
     numUserBlocks: Int = 2,
     numItemBlocks: Int = 3,
     targetRMSE: Double = 0.05): Unit = {
     import sqlc.implicits._
-    training.persist(StorageLevel.MEMORY_ONLY)
-    test.persist(StorageLevel.MEMORY_ONLY)
+    training.persist(persistLevel)
+    test.persist(persistLevel)
 //    val NSamples = 100
 //    val trainSize = SizeEstimator.getTotalSize(training, NSamples)
 //    val testSize = SizeEstimator.getTotalSize(test, NSamples)
@@ -217,8 +219,9 @@ object AlsTest {
       .setImplicitPrefs(implicitPrefs)
       .setNumUserBlocks(numUserBlocks)
       .setNumItemBlocks(numItemBlocks)
-        .setCheckpointInterval(1)
+        .setCheckpointInterval(checkpointInterval)
       .setSeed(0)
+      .setPersistenceLevel(persistLevel)
     val alpha = als.getAlpha
     val model = als.fit(training.toDF())
     val predictions = model.transform(test.toDF())
@@ -292,13 +295,18 @@ object AlsTest {
     i += 1
     val iters = args(i).toInt
     i += 1
+      val persistLevel = StorageLevel.fromString(args(i))
+    i += 1
+    val checkpointInterval = args(i).toInt
+    i += 1
     val regLambda = args(i).toDouble
     i += 1
     val rmse = args(i).toDouble
     i += 1
-    val noiseStdev = if (args.length >= 10) args(i).toDouble else 0.01
+    val noiseStdev = if (args.length >= 12) args(i).toDouble else 0.01
     i += 1
-    val alsp = AlsParams(users, items, userBlocks, itemBlocks, factors, iters, regLambda, rmse, noiseStdev)
+    val alsp = AlsParams(users, items, userBlocks, itemBlocks, factors, iters, persistLevel, checkpointInterval,
+      regLambda, rmse, noiseStdev)
    // com.esotericsoftware.minlog.Log.TRACE()
     println(s"Running ALSTest with $alsp")
     val sparkConf = new SparkConf().setAppName("ALSTest")
@@ -306,8 +314,9 @@ object AlsTest {
       .set("spark.kryoserializer.buffer","1g")
       .set("spark.serializer","org.apache.spark.serializer.KryoSerializer")
     .set("spark.rdd.compress","true")
-      .set("spark.executor.extraJavaOptions","-verbose:gc -XX:+PrintGCDetails -XX:+PrintGCTimeStamps -XX:MetaspaceSize=100M")
+//      .set("spark.executor.extraJavaOptions","-verbose:gc -XX:+PrintGCDetails -XX:+PrintGCTimeStamps")
     master.map{ m => sparkConf.setMaster(m) }
+    println(s"SparkConf.master=${sparkConf.get("spark.master")}")
     sparkConf.registerKryoClasses(Array(classOf[Rating[Int]], classOf[Tuple2[Double,Double]]))
     val sc = new SparkContext(sparkConf)
     // val host = java.net.InetAddress.getLocalHost.getHostName

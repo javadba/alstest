@@ -155,7 +155,7 @@ private[recommendation] trait ALSParams extends ALSModelParams with HasMaxIter w
 
   setDefault(rank -> 10, maxIter -> 10, regParam -> 0.1, numUserBlocks -> 10, numItemBlocks -> 10,
     implicitPrefs -> false, alpha -> 1.0, userCol -> "user", itemCol -> "item",
-    ratingCol -> "rating", nonnegative -> false, checkpointInterval -> 100)
+    ratingCol -> "rating", nonnegative -> false, checkpointInterval -> 10)
 
   /**
    * Validates and transforms the input schema.
@@ -305,6 +305,10 @@ object ALSModel extends MLReadable[ALSModel] {
 class VzALS(override val uid: String) extends Estimator[ALSModel] with ALSParams
   with DefaultParamsWritable {
 
+  var _persistLevel = StorageLevel.MEMORY_AND_DISK_SER
+
+  def setPersistenceLevel(value: StorageLevel) =  { _persistLevel = value; this }
+
   import VzALS._
 
   def this() = this(Identifiable.randomUID("als"))
@@ -351,6 +355,8 @@ class VzALS(override val uid: String) extends Estimator[ALSModel] with ALSParams
   /** @group setParam */
   def setSeed(value: Long): this.type = set(seed, value)
 
+
+
   /**
    * Sets both numUserBlocks and numItemBlocks to the specific value.
    * @group setParam
@@ -373,7 +379,10 @@ class VzALS(override val uid: String) extends Estimator[ALSModel] with ALSParams
       numUserBlocks = $(numUserBlocks), numItemBlocks = $(numItemBlocks),
       maxIter = $(maxIter), regParam = $(regParam), implicitPrefs = $(implicitPrefs),
       alpha = $(alpha), nonnegative = $(nonnegative),
-      checkpointInterval = $(checkpointInterval), seed = $(seed))
+      checkpointInterval = $(checkpointInterval),
+      intermediateRDDStorageLevel = _persistLevel,
+      finalRDDStorageLevel = _persistLevel,
+      seed = $(seed))
     val userDF = userFactors.toDF("id", "features")
     val itemDF = itemFactors.toDF("id", "features")
     val model = new ALSModel(uid, $(rank), userDF, itemDF).setParent(this)
@@ -576,8 +585,8 @@ object VzALS extends DefaultParamsReadable[ALS] with Logging {
       implicitPrefs: Boolean = false,
       alpha: Double = 1.0,
       nonnegative: Boolean = false,
-      intermediateRDDStorageLevel: StorageLevel = StorageLevel.MEMORY_ONLY,
-      finalRDDStorageLevel: StorageLevel = StorageLevel.MEMORY_ONLY,
+      intermediateRDDStorageLevel: StorageLevel = StorageLevel.MEMORY_ONLY_SER,
+      finalRDDStorageLevel: StorageLevel = StorageLevel.MEMORY_ONLY_SER,
       checkpointInterval: Int = 10,
       seed: Long = 0L)(
       implicit ord: Ordering[ID]): (RDD[(ID, Array[Float])], RDD[(ID, Array[Float])]) = {
@@ -594,7 +603,7 @@ object VzALS extends DefaultParamsReadable[ALS] with Logging {
     val (userInBlocks, userOutBlocks) =
       makeBlocks("user", blockRatings, userPart, itemPart, intermediateRDDStorageLevel)
     // materialize blockRatings and user blocks
-    userOutBlocks.count()
+    val cnt = timing("Materializing userOutBlocks ..",{ userOutBlocks.count() })
     val swappedBlockRatings = blockRatings.map {
       case ((userBlockId, itemBlockId), RatingBlock(userIds, itemIds, localRatings)) =>
         ((itemBlockId, userBlockId), RatingBlock(itemIds, userIds, localRatings))
@@ -1168,14 +1177,19 @@ object VzALS extends DefaultParamsReadable[ALS] with Logging {
       solver: LeastSquaresNESolver): RDD[(Int, FactorBlock)] = {
     val numSrcBlocks = srcFactorBlocks.partitions.length
     val YtY = if (implicitPrefs) Some(computeYtY(srcFactorBlocks, rank)) else None
+    var start = System.currentTimeMillis
     val srcOut = srcOutBlocks.join(srcFactorBlocks).flatMap {
       case (srcBlockId, (srcOutBlock, srcFactors)) =>
         srcOutBlock.view.zipWithIndex.map { case (activeIndices, dstBlockId) =>
           (dstBlockId, (srcBlockId, activeIndices.map(idx => srcFactors(idx))))
         }
     }
+    endt(s"Join srcOut/FactorBlocks", start)
+    start = System.currentTimeMillis
     val merged = srcOut.groupByKey(new ALSPartitioner(dstInBlocks.partitions.length))
-    dstInBlocks.join(merged).mapValues {
+    endt(s"GroupByKey", start)
+    start = System.currentTimeMillis
+    val out = dstInBlocks.join(merged).mapValues {
       case (InBlock(dstIds, srcPtrs, srcEncodedIndices, ratings), srcFactors) =>
         val sortedSrcFactors = new Array[FactorBlock](numSrcBlocks)
         srcFactors.foreach { case (srcBlockId, factors) =>
@@ -1219,6 +1233,8 @@ object VzALS extends DefaultParamsReadable[ALS] with Logging {
         }
         dstFactors
     }
+    endt(s"Join user/items", start)
+    out
   }
 
   /**
@@ -1226,14 +1242,26 @@ object VzALS extends DefaultParamsReadable[ALS] with Logging {
    * Caching of the input factors is handled in [[ALS#train]].
    */
   private def computeYtY(factorBlocks: RDD[(Int, FactorBlock)], rank: Int): NormalEquation = {
-    factorBlocks.values.aggregate(new NormalEquation(rank))(
+    timing(s"Computing gramian of input with rank $rank ..",
+      {factorBlocks.values.aggregate(new NormalEquation(rank))(
       seqOp = (ne, factors) => {
         factors.foreach(ne.add(_, 0.0))
         ne
       },
-      combOp = (ne1, ne2) => ne1.merge(ne2))
+      combOp = (ne1, ne2) => ne1.merge(ne2))}
+    ).asInstanceOf[NormalEquation]
   }
 
+  @inline def endt(msg: String, start: Long) =
+    println(s"$msg completed in ${(((System.currentTimeMillis - start) / 10).toInt) / 100.0}secs")
+
+  def timing(name: String, block: => Any) = {
+    println(s" Starting $name ..")
+    val start = System.currentTimeMillis
+    val ret = block
+    endt(s"$name block ${ret.toString}}", start)
+    ret
+  }
   /**
    * Encoder for storing (blockId, localIndex) into a single integer.
    *
