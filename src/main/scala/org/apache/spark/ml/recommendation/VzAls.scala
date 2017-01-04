@@ -1242,6 +1242,7 @@ object VzALS extends DefaultParamsReadable[ALS] with Logging {
    * Caching of the input factors is handled in [[ALS#train]].
    */
   private def computeYtY(factorBlocks: RDD[(Int, FactorBlock)], rank: Int): NormalEquation = {
+    timing(s"computYtY on input",{factorBlocks.count})
     timing(s"Computing gramian of input with rank $rank ..",
       {factorBlocks.values.aggregate(new NormalEquation(rank))(
       seqOp = (ne, factors) => {
@@ -1259,7 +1260,7 @@ object VzALS extends DefaultParamsReadable[ALS] with Logging {
     println(s" Starting $name ..")
     val start = System.currentTimeMillis
     val ret = block
-    endt(s"$name block ${ret.toString}}", start)
+    endt(s"$name block ${ret.toString}", start)
     ret
   }
   /**

@@ -131,6 +131,11 @@ object AlsTest {
     val random = new Random(seed)
     val userFactors = genFactors(numUsers, rank, random)
     val itemFactors = genFactors(numItems, rank, random)
+    println(s"userFactors: ${userFactors.take(20)} itemFactors: ${itemFactors.take(20)}")
+    val sorted = userFactors.map(_._1).sorted.takeRight(20)
+    println(s"max userids=$sorted}")
+    val sorted2 = itemFactors.map(_._1).sorted.takeRight(20)
+    println(s"max itemids=$sorted2}")
     val training = ArrayBuffer.empty[Rating[Int]]
     val test = ArrayBuffer.empty[Rating[Int]]
     for ((userId, userFactor) <- userFactors; (itemId, itemFactor) <- itemFactors) {
@@ -315,16 +320,21 @@ object AlsTest {
       .set("spark.serializer","org.apache.spark.serializer.KryoSerializer")
     .set("spark.rdd.compress","true")
 //      .set("spark.executor.extraJavaOptions","-verbose:gc -XX:+PrintGCDetails -XX:+PrintGCTimeStamps")
+
     master.map{ m => sparkConf.setMaster(m) }
     println(s"SparkConf.master=${sparkConf.get("spark.master")}")
     sparkConf.registerKryoClasses(Array(classOf[Rating[Int]], classOf[Tuple2[Double,Double]]))
     val sc = new SparkContext(sparkConf)
     // val host = java.net.InetAddress.getLocalHost.getHostName
     //    val tempDir = File.createTempFile(s"hdfs://$host:8021/tmp/alsTest","tmp")
+    val host = java.net.InetAddress.getLocalHost.getHostName
+//    val tempDir = s"hdfs://$host:8020/alsTest/"
     val tempDir = s"alsTest"
     sc.setCheckpointDir(tempDir)
     val sqlc = new SQLContext(sc)
     val res = blastorama(sc, sqlc, alsp)
 
   }
+
+
 }
